@@ -4,22 +4,29 @@ import cors from "cors";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 
-dotenv.config(); // lee .env
+dotenv.config(); // lee variables de .env
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ====== Mailer (Gmail) ======
+// Token MP
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
+if (!MP_ACCESS_TOKEN) {
+  console.error("❌ ERROR: Falta MP_ACCESS_TOKEN en .env");
+  process.exit(1);
+}
+
+// Configuración del mailer
 const mailer = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: process.env.EMAIL_USER, // origenneri@gmail.com
-    pass: process.env.EMAIL_PASS, // contraseña de app
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
 });
 
-// Helper para enviar mail (si EMAIL_TO no está, no hace nada)
+// Función para enviar correo
 async function notify(subject, html) {
   if (!process.env.EMAIL_TO) return;
   try {
@@ -35,22 +42,15 @@ async function notify(subject, html) {
   }
 }
 
-// ====== Verificación de token MP ======
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
-if (!MP_ACCESS_TOKEN) {
-  console.error("ERROR: Falta MP_ACCESS_TOKEN en .env");
-  process.exit(1);
-}
-
-// ====== Health ======
+// Endpoint de prueba
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ====== Crear preferencia (soporta 1 o varios ítems) ======
+// Crear preferencia
 app.post("/api/mp/create_preference", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // 1) Armar items (multi o viejo formato)
+    // Soportar multi-items o un solo item
     let items = [];
     if (Array.isArray(body.items) && body.items.length) {
       items = body.items.map((it) => ({
@@ -70,21 +70,16 @@ app.post("/api/mp/create_preference", async (req, res) => {
       ];
     }
 
-    // 2) Metadata útil (para que llegue al webhook)
-    const buyer = body.buyer || body;
     const metadata = {
-      first_name: buyer.first_name || "",
-      last_name: buyer.last_name || "",
-      dni: buyer.dni || "",
-      phone: buyer.phone || "",
-      email: buyer.email || "",
-      address: buyer.address || "",
-      pack: body.pack || "",
+      first_name: body.first_name || "",
+      last_name: body.last_name || "",
+      dni: body.dni || "",
+      phone: body.phone || "",
+      email: body.email || "",
+      address: body.address || "",
       note: body.note || "",
-      items, // guardo también el detalle elegido
     };
 
-    // 3) Crear preferencia en MP
     const pref = {
       items,
       metadata,
@@ -94,35 +89,29 @@ app.post("/api/mp/create_preference", async (req, res) => {
         failure: "https://origenneri1.odoo.com",
       },
       auto_return: "approved",
-      notification_url:
-        process.env.MP_WEBHOOK_URL ||
-        "https://origenneri-backend.onrender.com/api/mp/webhook",
+      notification_url: process.env.MP_WEBHOOK_URL, // tu webhook en Render
     };
 
-    const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${MP_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(pref),
-    });
+    const r = await fetch(
+      "https://api.mercadopago.com/checkout/preferences",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${MP_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(pref),
+      }
+    );
 
     const data = await r.json();
     if (!r.ok) {
-      console.error("Mercado Pago error:", data);
-      return res
-        .status(400)
-        .json({ error: data?.message || "No se pudo crear preferencia" });
+      console.error("❌ MP error:", data);
+      return res.status(500).json({ error: "No se pudo crear preferencia MP" });
     }
 
-    // (Opcional) avisar por mail que se creó la preferencia
-    await notify(
-      "Preferencia creada",
-      `<h2>Preferencia creada</h2>
-       <p>Detalle:</p>
-       <pre>${JSON.stringify({ items, metadata }, null, 2)}</pre>`
-    );
+    // Aviso de creación de preferencia (opcional, podés sacarlo si querés menos mails)
+    await notify("Preferencia creada", `<pre>${JSON.stringify(pref, null, 2)}</pre>`);
 
     res.json({
       id: data.id,
@@ -135,19 +124,28 @@ app.post("/api/mp/create_preference", async (req, res) => {
   }
 });
 
-// ====== Webhook de Mercado Pago ======
+// Webhook de Mercado Pago (solo manda email de la venta)
 app.post("/api/mp/webhook", async (req, res) => {
   try {
-    // Log breve para que sepas que llegó (sin spam de JSON gigante)
-    const topic = req.body?.topic || req.body?.type;
-    const id = req.body?.data?.id || req.body?.id || "";
-    console.log("Webhook:", topic || "?", id || "");
+    console.log("🔔 Webhook recibido:", JSON.stringify(req.body, null, 2));
 
-    // No enviamos correo desde el webhook
+    // Mandar email solo cuando llega la data de la orden
+    if (req.body && req.body.data) {
+      await notify(
+        "Nueva compra recibida",
+        `<h2>Nueva compra</h2><pre>${JSON.stringify(req.body.data, null, 2)}</pre>`
+      );
+    }
+
     res.sendStatus(200);
   } catch (e) {
-    console.error("Error en webhook:", e);
-    // Igual devolvemos 200 para que MP no reintente
-    res.sendStatus(200);
+    console.error("❌ Error en webhook:", e);
+    res.sendStatus(500);
   }
+});
+
+// Levantar servidor
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`Servidor MP escuchando en http://localhost:${PORT}`);
 });
