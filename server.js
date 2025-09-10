@@ -27,7 +27,53 @@ app.post("/api/mp/create_preference", async (req, res) => {
 
     const preference = {
       items: [
-        {
+// --- NUEVO: aceptar 1 ítem o varios ---
+const body = req.body || {};
+
+// 1) Items
+let items = [];
+if (Array.isArray(body.items) && body.items.length) {
+  items = body.items.map(it => ({
+    title: String(it.title || "Ítem Origen Neri"),
+    quantity: Number(it.quantity || 1),
+    currency_id: "ARS",
+    unit_price: Number(it.unit_price || 0)
+  }));
+} else {
+  // compatibilidad con formato viejo
+  items = [{
+    title: String(body.title || "Compra Origen Neri"),
+    quantity: Number(body.quantity || 1),
+    currency_id: "ARS",
+    unit_price: Number(body.unit_price || 0)
+  }];
+}
+
+// 2) Metadata (datos del comprador)
+const buyer = body.buyer || body;
+const metadata = {
+  first_name: buyer.first_name || "",
+  last_name:  buyer.last_name  || "",
+  dni:        buyer.dni        || "",
+  phone:      buyer.phone      || "",
+  email:      buyer.email      || "",
+  address:    buyer.address    || "",
+  pack:       body.pack        || "",
+  note:       body.note        || ""
+};
+
+// 3) Preferencia
+const preference = {
+  items,
+  metadata,
+  back_urls: {
+    success: "https://origenneri1.odoo.com",
+    pending: "https://origenneri1.odoo.com",
+    failure: "https://origenneri1.odoo.com"
+  },
+  auto_return: "approved",
+  notification_url: process.env.MP_WEBHOOK_URL || undefined
+};        {
           title: title || "Producto",
           quantity: qty,
           currency_id: "ARS",
