@@ -158,6 +158,26 @@ app.post("/api/mp/webhook", async (req, res) => {
 
 // ====== Start ======
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () =>
+// Endpoint de prueba de email y logs (GET)
+app.get("/test-email", async (req, res) => {
+  try {
+    await notify("Prueba Origen Neri", "<h2>Prueba OK</h2><p>Este es un test manual.</p>");
+    console.log("✅ Email de prueba enviado");
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("✖ Error enviando email de prueba:", e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Endpoint de prueba de webhook (POST o GET) para ver logs
+app.all("/api/mp/webhook-test", (req, res) => {
+  console.log("📩 webhook-test recibido:", {
+    method: req.method,
+    headers: req.headers,
+    body: req.body
+  });
+  res.sendStatus(200);
+});app.listen(PORT, () =>
   console.log(`Servidor MP escuchando en http://localhost:${PORT}`)
 );
