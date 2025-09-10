@@ -119,16 +119,38 @@ app.post("/api/mp/webhook", async (req, res) => {
   try {
     console.log("Webhook recibido:", req.body);
 
-    // Guardá la info de la compra (acá sólo mostramos en consola)
     if (req.body && req.body.data) {
-      console.log("Datos de compra:", JSON.stringify(req.body.data, null, 2));
+      const datos = JSON.stringify(req.body.data, null, 2);
+      console.log("Datos de compra:", datos);
+
+      // ---- Enviar correo con Nodemailer ----
+      import nodemailer from "nodemailer";
+
+      const transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS
+        }
+      });
+
+      const mailOptions = {
+        from: `"Origen Neri" <${process.env.EMAIL_USER}>`,
+        to: process.env.EMAIL_TO,
+        subject: "📦 Nueva compra recibida en Origen Neri",
+        text: `Se recibió una nueva compra en Mercado Pago:\n\n${datos}`,
+        html: `<h2>Nueva compra recibida</h2>
+               <pre>${datos}</pre>`
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("📧 Email enviado correctamente");
+      } catch (err) {
+        console.error("❌ Error enviando email:", err);
+      }
     }
 
-    res.sendStatus(200); // Confirmar a MP que recibimos la notificación
-  } catch (e) {
-    console.error("Error en webhook:", e);
-    res.sendStatus(500);
-  }
-});
+    res.sendStatus(200);});
 app.listen(PORT, () => console.log(`Servidor MP escuchando en http://localhost:${PORT}`));
 
