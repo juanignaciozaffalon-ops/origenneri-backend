@@ -4,153 +4,160 @@ import cors from "cors";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 
-const mailer = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-});
-
-async function notify(subject, html) {
-  if (!process.env.EMAIL_TO) return;
-  await mailer.sendMail({
-    from: `"Origen Neri" <${process.env.EMAIL_USER}>`,
-    to: process.env.EMAIL_TO,
-    subject,
-    html,
-  });
-}dotenv.config(); // lee las variables de .env
+dotenv.config(); // lee .env
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ====== Mailer (Gmail) ======
+const mailer = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER, // origenneri@gmail.com
+    pass: process.env.EMAIL_PASS, // contraseña de app
+  },
+});
+
+// Helper para enviar mail (si EMAIL_TO no está, no hace nada)
+async function notify(subject, html) {
+  if (!process.env.EMAIL_TO) return;
+  try {
+    await mailer.sendMail({
+      from: `"Origen Neri" <${process.env.EMAIL_USER}>`,
+      to: process.env.EMAIL_TO,
+      subject,
+      html,
+    });
+    console.log("📧 Email enviado OK");
+  } catch (err) {
+    console.error("❌ Error enviando email:", err);
+  }
+}
+
+// ====== Verificación de token MP ======
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
 if (!MP_ACCESS_TOKEN) {
   console.error("ERROR: Falta MP_ACCESS_TOKEN en .env");
   process.exit(1);
 }
 
-// Endpoint de prueba
+// ====== Health ======
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Endpoint para crear preferencia en Mercado Pago
+// ====== Crear preferencia (soporta 1 o varios ítems) ======
 app.post("/api/mp/create_preference", async (req, res) => {
-try {
+  try {
     const body = req.body || {};
 
-    // 1) Soportar multi-items o el formato viejo de un solo ítem
+    // 1) Armar items (multi o viejo formato)
     let items = [];
     if (Array.isArray(body.items) && body.items.length) {
-      items = body.items.map(it => ({
+      items = body.items.map((it) => ({
         title: String(it.title || "Producto Origen Neri"),
         quantity: Number(it.quantity || 1),
         currency_id: "ARS",
-        unit_price: Number(it.unit_price || 0)
+        unit_price: Number(it.unit_price || 0),
       }));
     } else {
-      // fallback formato viejo
-      items = [{
-        title: String(body.title || "Compra Origen Neri"),
-        quantity: Number(body.quantity || 1),
-        currency_id: "ARS",
-        unit_price: Number(body.unit_price || 0)
-      }];
+      items = [
+        {
+          title: body.title || "Compra Origen Neri",
+          quantity: Number(body.quantity || 1),
+          currency_id: "ARS",
+          unit_price: Number(body.unit_price || 0),
+        },
+      ];
     }
 
-    // 2) Info del comprador (si viene)
+    // 2) Metadata útil (para que llegue al webhook)
     const buyer = body.buyer || body;
     const metadata = {
       first_name: buyer.first_name || "",
-      last_name:  buyer.last_name  || "",
-      dni:        buyer.dni        || "",
-      phone:      buyer.phone      || "",
-      email:      buyer.email      || "",
-      address:    buyer.address    || "",
-      pack:       body.pack        || "",
-      note:       body.note        || "",
-      // 👇 IMPORTANTE: guardamos también los ítems en metadata
-      items: items.map(i => ({
-        title: i.title,
-        quantity: i.quantity,
-        unit_price: i.unit_price
-      }))
+      last_name: buyer.last_name || "",
+      dni: buyer.dni || "",
+      phone: buyer.phone || "",
+      email: buyer.email || "",
+      address: buyer.address || "",
+      pack: body.pack || "",
+      note: body.note || "",
+      items, // guardo también el detalle elegido
     };
 
-    // 3) Preferencia para MP (con webhook)
+    // 3) Crear preferencia en MP
     const pref = {
       items,
-      metadata, // 👈 así MP te reenvía estos datos al webhook
+      metadata,
       back_urls: {
         success: "https://origenneri1.odoo.com",
         pending: "https://origenneri1.odoo.com",
-        failure: "https://origenneri1.odoo.com"
+        failure: "https://origenneri1.odoo.com",
       },
       auto_return: "approved",
-      // 👇 MUY IMPORTANTE: URL pública de tu webhook
-      notification_url: process.env.MP_WEBHOOK_URL // setear en Render
+      notification_url:
+        process.env.MP_WEBHOOK_URL ||
+        "https://origenneri-backend.onrender.com/api/mp/webhook",
     };
 
     const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${MP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(pref)
+      body: JSON.stringify(pref),
     });
 
     const data = await r.json();
     if (!r.ok) {
-      console.error("MP error:", data);
-      return res.status(500).json({ error: "No se pudo crear preferencia MP" });
+      console.error("Mercado Pago error:", data);
+      return res
+        .status(400)
+        .json({ error: data?.message || "No se pudo crear preferencia" });
     }
+
+    // (Opcional) avisar por mail que se creó la preferencia
+    await notify(
+      "Preferencia creada",
+      `<h2>Preferencia creada</h2>
+       <p>Detalle:</p>
+       <pre>${JSON.stringify({ items, metadata }, null, 2)}</pre>`
+    );
 
     res.json({
       id: data.id,
       init_point: data.init_point,
-      sandbox_init_point: data.sandbox_init_point
-    });}        catch (e) {
+      sandbox_init_point: data.sandbox_init_point,
+    });
+  } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Error interno" });
   }
 });
 
-const PORT = process.env.PORT || 3001;// Webhook de Mercado Pago
+// ====== Webhook de Mercado Pago ======
 app.post("/api/mp/webhook", async (req, res) => {
   try {
-    console.log("Webhook recibido:", req.body);
+    // MP suele mandar { action, data: { id }, type }, etc.
+    console.log("📥 Webhook recibido:", JSON.stringify(req.body, null, 2));
 
-    if (req.body && req.body.data) {
-      const datos = JSON.stringify(req.body.data, null, 2);
-      console.log("Datos de compra:", datos);
+    // Enviamos mail con lo que vino (incluye metadata si MP la reenvía)
+    await notify(
+      "Nueva compra (Webhook MP)",
+      `<h2>Nueva compra recibida</h2>
+       <pre>${JSON.stringify(req.body, null, 2)}</pre>`
+    );
 
-      // ---- Enviar correo con Nodemailer ----
-      import nodemailer from "nodemailer";
+    // Importante: devolver 200 a MP
+    res.sendStatus(200);
+  } catch (e) {
+    console.error("Error en webhook:", e);
+    res.sendStatus(500);
+  }
+});
 
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASS
-        }
-      });
-
-      const mailOptions = {
-        from: `"Origen Neri" <${process.env.EMAIL_USER}>`,
-        to: process.env.EMAIL_TO,
-        subject: "📦 Nueva compra recibida en Origen Neri",
-        text: `Se recibió una nueva compra en Mercado Pago:\n\n${datos}`,
-        html: `<h2>Nueva compra recibida</h2>
-               <pre>${datos}</pre>`
-      };
-
-      try {
-        await transporter.sendMail(mailOptions);
-        console.log("📧 Email enviado correctamente");
-      } catch (err) {
-        console.error("❌ Error enviando email:", err);
-      }
-    }
-
-    res.sendStatus(200);});
-app.listen(PORT, () => console.log(`Servidor MP escuchando en http://localhost:${PORT}`));
-
+// ====== Start ======
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () =>
+  console.log(`Servidor MP escuchando en http://localhost:${PORT}`)
+);
