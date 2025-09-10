@@ -1,7 +1,6 @@
 // server.js — Origen Neri backend con email interno + email al cliente con CC
 
 import express from "express";
-import fetch from "node-fetch";
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 import cors from "cors";
