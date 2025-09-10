@@ -1,80 +1,111 @@
-// server.js — Origen Neri backend con email interno + email al cliente con CC
-
+// server.js (ESM)
 import express from "express";
-import nodemailer from "nodemailer";
-import dotenv from "dotenv";
 import cors from "cors";
+import "dotenv/config";
+import fetch from "node-fetch";
+import nodemailer from "nodemailer";
 
-dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------- Crear preferencia ----------
+// ======= MP token
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
+if (!MP_ACCESS_TOKEN) {
+  console.error("ERROR: falta MP_ACCESS_TOKEN");
+  process.exit(1);
+}
+
+// ======= Mailer (Gmail app password)
+const mailer = nodemailer.createTransport({
+  service: "gmail",
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+});
+async function notify(to, subject, html) {
+  if (!to) return;
+  try {
+    await mailer.sendMail({
+      from: `Origen Neri <${process.env.EMAIL_USER}>`,
+      to,
+      cc: process.env.EMAIL_TO, // copia al admin siempre
+      subject,
+      html,
+    });
+    console.log("Email enviado OK ->", to);
+  } catch (e) {
+    console.error("Error enviando email:", e?.message || e);
+  }
+}
+
+// ======= Util
+const ORIGIN = "https://originneri.com";
+const BACKEND_URL = "https://origenn eri-backend.onrender.com".replace(" ", "");
+
+// ======= Pref de prueba
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// ======= Crear preferencia
 app.post("/api/mp/create_preference", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // Multi-items o item único (fallback)
+    // Items (solo los que tengan cantidad)
     let items = [];
-    if (Array.isArray(body.items) && body.items.length) {
-      items = body.items.map(it => ({
-        title: it.title,
-        quantity: Number(it.quantity || 1),
-        currency_id: "ARS",
-        unit_price: Number(it.unit_price || 0)
-      }));
-    } else {
-      items = [{
-        title: body.title || "Compra Origen Neri",
-        quantity: Number(body.quantity || 1),
-        currency_id: "ARS",
-        unit_price: Number(body.unit_price || 0)
-      }];
+    if (Array.isArray(body.items)) {
+      items = body.items
+        .filter(it => Number(it?.quantity) > 0)
+        .map(it => ({
+          title: String(it.title || "Producto Origen Neri"),
+          quantity: Number(it.quantity || 1),
+          currency_id: "ARS",
+          unit_price: Number(it.unit_price || 0),
+        }));
+    }
+    if (!items.length) {
+      return res.status(400).json({ error: "Sin items" });
     }
 
-    // Info comprador (via metadata)
+    // Buyer metadata (para el email)
     const buyer = body.buyer || {};
     const metadata = {
       first_name: buyer.first_name || "",
-      last_name:  buyer.last_name  || "",
-      dni:        buyer.dni        || "",
-      phone:      buyer.phone      || "",
-      email:      buyer.email      || "",
-      address:    buyer.address    || ""
+      last_name: buyer.last_name || "",
+      dni: buyer.dni || "",
+      phone: buyer.phone || "",
+      email: buyer.email || "",
+      address: buyer.address || "",
+      note: body.note || "",
     };
 
-    const pref = {
+    const preference = {
       items,
       metadata,
       back_urls: {
-        success: "https://origenneri.com",
-        pending: "https://origenneri.com",
-        failure: "https://origenneri.com"
+        success: `${ORIGIN}/?compra=aprobada`,
+        pending: `${ORIGIN}/?compra=pendiente`,
+        failure: `${ORIGIN}/?compra=falla`,
       },
       auto_return: "approved",
-      notification_url: process.env.MP_WEBHOOK_URL || undefined
+      notification_url: `${BACKEND_URL}/api/mp/webhook`,
     };
 
     const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${MP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(pref)
+      body: JSON.stringify(preference),
     });
-
     const data = await r.json();
-    if (!r.ok) {
-      console.error("MP error:", data);
-      return res.status(500).json({ error: "No se pudo crear preferencia MP" });
+    if (!r.ok || !data?.init_point) {
+      console.error("Error MP pref:", data);
+      return res.status(400).json({ error: "Mercado Pago rechazó la preferencia" });
     }
 
     res.json({
       id: data.id,
       init_point: data.init_point,
-      sandbox_init_point: data.sandbox_init_point
     });
   } catch (e) {
     console.error(e);
@@ -82,172 +113,100 @@ app.post("/api/mp/create_preference", async (req, res) => {
   }
 });
 
-// ---------- Webhook MP (un solo correo interno + correo al cliente con CC a vos) ----------
-const processedPayments = new Set();
+// ======= Webhook: enviamos UN email cuando la orden está cerrada (pagada)
+const alreadyNotified = new Set();
 
-app.post("/webhook", async (req, res) => {
+app.post("/api/mp/webhook", async (req, res) => {
   try {
-    const body = req.body || {};
-    const topic = body.topic || body.type || "";
-    const paymentId = body.data?.id || body.data?.resource || body.id || null;
+    // Mercado Pago envía {action, resource, topic, ...}
+    const { resource, topic, id } = req.body || {};
 
-    // Solo pagos
-    if (!topic.toLowerCase().includes("payment") || !paymentId) {
-      return res.status(200).json({ ok: true, skip: "no es evento de pago" });
+    // Aceptamos tanto resource como id
+    let moUrl = resource;
+    if (!moUrl && topic === "merchant_order" && id) {
+      moUrl = `https://api.mercadopago.com/merchant_orders/${id}`;
     }
-    // Evitar duplicados
-    if (processedPayments.has(String(paymentId))) {
-      return res.status(200).json({ ok: true, skip: "duplicado" });
+    if (!moUrl) {
+      res.sendStatus(200);
+      return;
     }
 
-    // Traer el pago
-    const pr = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-      headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+    // Buscamos la merchant_order
+    const mor = await fetch(moUrl, {
+      headers: { Authorization: `Bearer ${MP_ACCESS_TOKEN}` },
     });
-    const p = await pr.json();
-    if (!pr.ok) {
-      console.error("No se pudo leer payment:", p);
-      return res.status(200).json({ ok: true, skip: "payment fetch error" });
+    const order = await mor.json();
+
+    // Evitamos duplicados
+    const key = String(order.id || id || moUrl);
+    if (alreadyNotified.has(key)) {
+      res.sendStatus(200);
+      return;
     }
 
-    // Solo aprobados
-    if ((p.status || "").toLowerCase() !== "approved") {
-      return res.status(200).json({ ok: true, skip: "pago no aprobado" });
+    // Sólo cuando está "closed" (pagada)
+    if (order.status !== "closed") {
+      res.sendStatus(200);
+      return;
     }
 
-    processedPayments.add(String(paymentId));
+    // Intentamos encontrar email del comprador desde el pago aprobado
+    let buyerEmail = "";
+    try {
+      const approved = Array.isArray(order.payments)
+        ? order.payments.find(p => p.status === "approved")
+        : null;
+      if (approved?.id) {
+        const pr = await fetch(`https://api.mercadopago.com/v1/payments/${approved.id}`, {
+          headers: { Authorization: `Bearer ${MP_ACCESS_TOKEN}` },
+        });
+        const pay = await pr.json();
+        buyerEmail = pay?.payer?.email || "";
+      }
+    } catch {}
 
-    // Ítems e info comprador
-    const items = Array.isArray(p.additional_info?.items) ? p.additional_info.items : [];
-    const meta = p.metadata || {};
-    const buyer = {
-      first_name: meta.first_name || p.payer?.first_name || "",
-      last_name:  meta.last_name  || p.payer?.last_name  || "",
-      dni:        meta.dni        || (p.payer?.identification?.number || ""),
-      phone:      meta.phone      || p.payer?.phone?.number || "",
-      email:      meta.email      || p.payer?.email || "",
-      address:    meta.address    || ""
-    };
+    // Armamos HTML de resumen
+    const itemsHtml = (order.items || [])
+      .map(it => `<li>${it.title} — x${it.quantity} ($${it.unit_price})</li>`)
+      .join("");
 
-    // Totales
-    const totalBotellas = items.reduce((acc, it) => acc + Number(it.quantity || 0), 0);
-    const subtotal = items.reduce((acc, it) => acc + Number(it.quantity || 0) * Number(it.unit_price || 0), 0);
+    const totalStr = typeof order.total_amount === "number"
+      ? order.total_amount.toLocaleString("es-AR")
+      : "-";
 
-    let tramo = "Precio regular";
-    if (totalBotellas >= 6) tramo = "$13.500 c/u (6 o más)";
-    else if (totalBotellas >= 4) tramo = "$15.500 c/u (4 o 5)";
+    const buyerBlock = `
+      <p><strong>Comprador</strong><br>
+      ${order?.payer?.first_name || ""} ${order?.payer?.last_name || ""}<br>
+      ${buyerEmail || "sin email"}</p>`;
 
-    // Tabla ítems (para ambos mails)
-    const filas = items.map(it => `
-      <tr>
-        <td style="padding:6px 8px;border:1px solid #eee;">${it.title || "-"}</td>
-        <td style="padding:6px 8px;border:1px solid #eee;text-align:center;">${Number(it.quantity || 0)}</td>
-        <td style="padding:6px 8px;border:1px solid #eee;text-align:right;">$${Number(it.unit_price||0).toLocaleString("es-AR")}</td>
-        <td style="padding:6px 8px;border:1px solid #eee;text-align:right;">$${(Number(it.unit_price||0)*Number(it.quantity||0)).toLocaleString("es-AR")}</td>
-      </tr>
-    `).join("");
-
-    // ----- Mail interno (a vos) -----
-    const emailAdminHtml = `
-      <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222">
-        <h2>🧾 Compra aprobada — Origen Neri</h2>
-        <p>ID de pago: <strong>${paymentId}</strong></p>
-
-        <h3>Detalle del pedido</h3>
-        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:720px;">
-          <thead>
-            <tr>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Variedad</th>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Cant.</th>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Precio u.</th>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Subtotal</th>
-            </tr>
-          </thead>
-          <tbody>${filas}</tbody>
-        </table>
-
-        <div style="margin-top:14px;padding:10px;border:1px dashed #ddd;background:#fbfbfb;">
-          <p><strong>Total de botellas:</strong> ${totalBotellas}</p>
-          <p><strong>Precio aplicado:</strong> ${tramo}</p>
-          <p><strong>Total abonado:</strong> $${subtotal.toLocaleString("es-AR")}</p>
-        </div>
-
-        <h3>Datos del comprador</h3>
-        <ul>
-          <li><strong>Nombre:</strong> ${buyer.first_name} ${buyer.last_name}</li>
-          <li><strong>DNI:</strong> ${buyer.dni}</li>
-          <li><strong>Celular:</strong> ${buyer.phone}</li>
-          <li><strong>Email:</strong> ${buyer.email}</li>
-          <li><strong>Dirección:</strong> ${buyer.address}</li>
-        </ul>
-      </div>
+    const html = `
+      <h2>✅ Nueva compra aprobada</h2>
+      ${buyerBlock}
+      <p><strong>Orden:</strong> ${order.id}</p>
+      <ul>${itemsHtml}</ul>
+      <p><strong>Total cobrado:</strong> $${totalStr}</p>
     `;
 
-    // ----- Mail para el cliente (con CC a vos) -----
-    const emailClienteHtml = `
-      <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222">
-        <h2>¡Gracias por tu compra, ${buyer.first_name || ""}!</h2>
-        <p>Tu pago fue <strong>aprobado</strong>. En breve alguien del equipo de <strong>Origen Neri</strong> te contactará para coordinar el envío.</p>
-        <p><strong>ID de pago:</strong> ${paymentId}</p>
-
-        <h3>Resumen del pedido</h3>
-        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:720px;">
-          <thead>
-            <tr>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Variedad</th>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Cant.</th>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Precio u.</th>
-              <th style="padding:8px;border:1px solid #eee;background:#fafafa;">Subtotal</th>
-            </tr>
-          </thead>
-          <tbody>${filas}</tbody>
-        </table>
-
-        <div style="margin-top:14px;padding:10px;border:1px dashed #ddd;background:#fbfbfb;">
-          <p><strong>Total de botellas:</strong> ${totalBotellas}</p>
-          <p><strong>Precio aplicado:</strong> ${tramo}</p>
-          <p><strong>Total abonado:</strong> $${subtotal.toLocaleString("es-AR")}</p>
-        </div>
-
-        <p style="margin-top:16px;">Cualquier consulta, respondé este email o escribinos por WhatsApp.</p>
-        <p>— Equipo Origen Neri</p>
-      </div>
-    `;
-
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-    });
-
-    // 1) Envío interno (a vos)
-    await transporter.sendMail({
-      from: `"Origen Neri" <${process.env.EMAIL_USER}>`,
-      to: process.env.EMAIL_TO,
-      subject: `Compra aprobada — ${totalBotellas} botellas — $${subtotal.toLocaleString("es-AR")}`,
-      html: emailAdminHtml
-    });
-
-    // 2) Envío al cliente (si tenemos email), con CC a vos para comprobar recepción
-    if ((buyer.email || "").includes("@")) {
-      await transporter.sendMail({
-        from: `"Origen Neri" <${process.env.EMAIL_USER}>`,
-        to: buyer.email,
-        cc: process.env.EMAIL_TO, // copia a vos
-        replyTo: process.env.EMAIL_TO, // si responde, te llega a vos
-        subject: `¡Gracias por tu compra! — Origen Neri`,
-        html: emailClienteHtml
-      });
+    // Enviamos: al admin (EMAIL_TO) y, si tenemos, al comprador
+    await notify(process.env.EMAIL_TO, "Nueva compra Origen Neri", html);
+    if (buyerEmail) {
+      await notify(buyerEmail, "Gracias por tu compra — Origen Neri", `
+        <h2>¡Gracias por tu compra!</h2>
+        <p>Tu pago fue aprobado. En breve alguien del equipo se contactará para coordinar el envío.</p>
+        ${html}
+      `);
     }
 
-    res.status(200).json({ ok: true });
-  } catch (err) {
-    console.error("Webhook error:", err);
-    res.status(200).json({ ok: true, skip: "catch error" });
+    alreadyNotified.add(key);
+    res.sendStatus(200);
+  } catch (e) {
+    console.error("Error webhook:", e?.message || e);
+    res.sendStatus(200); // siempre 200 para que MP no reintente infinito
   }
 });
 
-// ---------- Start ----------
-const PORT = process.env.PORT || 3000;
+// ======= Start
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+  console.log(`Servidor MP escuchando en http://localhost:${PORT}`);
 });
