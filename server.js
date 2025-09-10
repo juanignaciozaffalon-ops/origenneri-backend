@@ -83,12 +83,12 @@ app.post("/api/mp/create_preference", async (req, res) => {
     const pref = {
       items,
       metadata,
-      back_urls: {
-        success: "https://origenneri1.odoo.com",
-        pending: "https://origenneri1.odoo.com",
-        failure: "https://origenneri1.odoo.com",
-      },
-      auto_return: "approved",
+back_urls: {
+  success: "https://origenneri.com/?compra=aprobada",
+  pending: "https://origenneri.com/?compra=pendiente",
+  failure: "https://origenneri.com/?compra=falla"
+},
+auto_return: "approved",
       notification_url: process.env.MP_WEBHOOK_URL, // tu webhook en Render
     };
 
