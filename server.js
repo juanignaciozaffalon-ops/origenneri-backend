@@ -92,6 +92,21 @@ try {
   }
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3001;// Webhook de Mercado Pago
+app.post("/api/mp/webhook", async (req, res) => {
+  try {
+    console.log("Webhook recibido:", req.body);
+
+    // Guardá la info de la compra (acá sólo mostramos en consola)
+    if (req.body && req.body.data) {
+      console.log("Datos de compra:", JSON.stringify(req.body.data, null, 2));
+    }
+
+    res.sendStatus(200); // Confirmar a MP que recibimos la notificación
+  } catch (e) {
+    console.error("Error en webhook:", e);
+    res.sendStatus(500);
+  }
+});
 app.listen(PORT, () => console.log(`Servidor MP escuchando en http://localhost:${PORT}`));
 
