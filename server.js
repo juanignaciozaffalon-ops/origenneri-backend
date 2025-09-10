@@ -138,46 +138,16 @@ app.post("/api/mp/create_preference", async (req, res) => {
 // ====== Webhook de Mercado Pago ======
 app.post("/api/mp/webhook", async (req, res) => {
   try {
-    // MP suele mandar { action, data: { id }, type }, etc.
-    console.log("📥 Webhook recibido:", JSON.stringify(req.body, null, 2));
+    // Log breve para que sepas que llegó (sin spam de JSON gigante)
+    const topic = req.body?.topic || req.body?.type;
+    const id = req.body?.data?.id || req.body?.id || "";
+    console.log("Webhook:", topic || "?", id || "");
 
-    // Enviamos mail con lo que vino (incluye metadata si MP la reenvía)
-    await notify(
-      "Nueva compra (Webhook MP)",
-      `<h2>Nueva compra recibida</h2>
-       <pre>${JSON.stringify(req.body, null, 2)}</pre>`
-    );
-
-    // Importante: devolver 200 a MP
+    // No enviamos correo desde el webhook
     res.sendStatus(200);
   } catch (e) {
     console.error("Error en webhook:", e);
-    res.sendStatus(500);
+    // Igual devolvemos 200 para que MP no reintente
+    res.sendStatus(200);
   }
 });
-
-// ====== Start ======
-const PORT = process.env.PORT || 3001;
-// Endpoint de prueba de email y logs (GET)
-app.get("/test-email", async (req, res) => {
-  try {
-    await notify("Prueba Origen Neri", "<h2>Prueba OK</h2><p>Este es un test manual.</p>");
-    console.log("✅ Email de prueba enviado");
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("✖ Error enviando email de prueba:", e);
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-// Endpoint de prueba de webhook (POST o GET) para ver logs
-app.all("/api/mp/webhook-test", (req, res) => {
-  console.log("📩 webhook-test recibido:", {
-    method: req.method,
-    headers: req.headers,
-    body: req.body
-  });
-  res.sendStatus(200);
-});app.listen(PORT, () =>
-  console.log(`Servidor MP escuchando en http://localhost:${PORT}`)
-);
